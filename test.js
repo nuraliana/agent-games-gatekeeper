@@ -11,6 +11,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const snarkjs = require('snarkjs');
+const { taskIdField, sha256Hex, taskIdToField } = require('./server.js');
 
 const SECRET = 'test-secret-do-not-use-in-production';
 const PORT = 3456;
@@ -152,6 +153,43 @@ CASES.push({ name: 'LATE (deadline_at in the past)', t: lateTask, want: ['REJECT
   const replay = await post('/agent', CASES[0].t);
   check('idempotent replay of task_id returns same decision',
     replay.status === 200 && replay.json && replay.json.decision === 'APPROVE');
+
+  // 19 Nov 2026 — taskId encoding FIX (UUID-BigInt). Unit checks.
+  const UUID1 = '0b566b18-6031-b1ff-ce22-b7bf6b3494b3';
+  const UUID2 = '7146b17d-b7b8-93da-232f-0da7ed1495b4';
+  check('taskIdField: task_R06_<uuid> -> BigInt(UUID hex, dashes stripped)',
+    taskIdField(`task_R06_${UUID1}`) === BigInt('0x' + UUID1.replace(/-/g, '')).toString());
+  check('taskIdField: task_R05_<uuid> -> BigInt(UUID hex)',
+    taskIdField(`task_R05_${UUID2}`) === BigInt('0x' + UUID2.replace(/-/g, '')).toString());
+  check('taskIdField: bare UUID (no prefix) -> BigInt(UUID hex)',
+    taskIdField(UUID1) === BigInt('0x' + UUID1.replace(/-/g, '')).toString());
+  const FIELD_P = BigInt('21888242871839275222246405745257275088548364400416034343698204186575808495617');
+  check('taskIdField: non-UUID practice id falls back to sha256 mod p',
+    taskIdField('gk_valid_1') === (BigInt(sha256Hex('gk_valid_1')) % FIELD_P).toString() &&
+    taskIdField('gk_valid_1') !== taskIdToField('gk_valid_1'));
+
+  // Live check: a practice task carrying a real UUID task_id must return a
+  // locally-verifying proof whose public signal [12] is exactly the UUID
+  // BigInt (the platform's expected binding for signal [12]).
+  const uuidTask = task(`task_R06_${UUID1}`);
+  const ur = await post('/agent', uuidTask);
+  const sigOkU = ur.headers.get('x-agent-games-signature') === sign(Buffer.from(JSON.stringify(ur.json)));
+  check('UUID task: APPROVE/VALID_CONDITION + signed',
+    ur.status === 200 && ur.json && ur.json.decision === 'APPROVE' &&
+    ur.json.reason_code === 'VALID_CONDITION' && sigOkU,
+    ur.status !== 200 ? `got ${ur.status} ${JSON.stringify(ur.json)}` : '');
+  if (ur.json && ur.json.proof && ur.json.public_signals) {
+    try {
+      const okU = await snarkjs.groth16.verify(vk, ur.json.public_signals, ur.json.proof);
+      check('UUID task: returned proof verifies locally', okU === true);
+    } catch (e) { check('UUID task: returned proof verifies locally', false, e.message); }
+    check('UUID task: public_signals[12] == BigInt(UUID hex)',
+      ur.json.public_signals[12] === BigInt('0x' + UUID1.replace(/-/g, '')).toString(),
+      `signal[12]=${ur.json.public_signals[12]}`);
+  } else {
+    check('UUID task: proof present in response', false, 'no proof/public_signals in response');
+    check('UUID task: public_signals[12] == BigInt(UUID hex)', false, 'no public_signals');
+  }
 
   console.log(`\n${pass} passed, ${fail} failed`);
   stop();

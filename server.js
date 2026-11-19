@@ -237,11 +237,39 @@ function toBigInt(v) {
 // task_id like "gk_24_9d1" is a string; the circuit takes a field element.
 // Encoding (GUESS — see GATEKEEPER_BUILD.md open questions): UTF-8 bytes
 // as one big-endian integer. Short ids fit in the field; long ones wrap mod p.
+// DEPRECATED 19 Nov 2026: this encoding NEVER matched what the platform
+// expects for public signal [12] (taskId) — every correct task scored +10
+// (platform proof_failure, 0 verified, R04–R06). Kept for reference/tests;
+// buildCircuitInput now uses taskIdField() below.
 function taskIdToField(taskId) {
   const bytes = Buffer.from(String(taskId || ''), 'utf8');
   let n = 0n;
   for (const b of bytes) n = (n << 8n) | BigInt(b);
   return (n % FIELD_MODULUS).toString();
+}
+function sha256Hex(str) {
+  return '0x' + crypto.createHash('sha256').update(str, 'utf8').digest('hex');
+}
+// 19 Nov 2026 — taskId encoding FIX (from hi5, verified against his live
+// repo commit 599aeff + the reference implementation's public-signal layout
+// [0]=commitment(taskId,salt) … [12]=taskId):
+// The platform binds the proof to the task via public signal [12] and
+// expects BigInt of the task UUID hex (dashes stripped). Platform task ids
+// look like "task_R06_0b566b18-6031-b1ff-ce22-b7bf6b3494b3" — the UUID is
+// embedded after the "task_R06_" prefix, so match() finds it anywhere in
+// the string. A UUID is 128 bits, FIELD_P ~254 bits, so it fits exactly
+// (no mod wrap). This mirrors how the Steal circuit treats matchId (bytes32).
+// hi5's live proof: keccak256 and sha256 of the full task_id were BOTH
+// disproven live (R06 task 2, 19:54 WIB, +10 again); after switching to
+// UUID-BigInt live 21:16 WIB, his R06 tasks 4–7 all scored +12 FULL and
+// verified proof went 0 -> 4. Salt is UNCHANGED (random per proof, same as
+// the reference implementation's freshSalt()) — salt is a private input
+// hidden inside the commitment, so only the taskId encoding matters.
+const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+function taskIdField(taskId) {
+  const m = String(taskId).match(UUID_RE);
+  if (m) return BigInt('0x' + m[0].replace(/-/g, '')).toString();
+  return (BigInt(sha256Hex(taskId)) % FIELD_MODULUS).toString(); // non-UUID (practice/probe)
 }
 function addrToField(addr) {
   const n = BigInt('0x' + (normAddr(addr) || '0'));
@@ -350,7 +378,7 @@ function buildCircuitInput(task, result) {
     expiryBlock: toBigInt(input.expiry_block).toString(),
     currentBlock: toBigInt(input.current_block).toString(),
     decision: result.decision === 'APPROVE' ? '1' : '0',
-    taskId: taskIdToField(task.task_id),
+    taskId: taskIdField(task.task_id), // 19 Nov 2026: UUID-BigInt (was taskIdToField UTF-8 — never matched platform signal [12])
     salt: BigInt('0x' + crypto.randomBytes(16).toString('hex')).toString(),
     registeredVkHash: vkHashToField(input.registered_vk),
     proofVkHash: vkHashToField(input.proof_vk),
@@ -618,4 +646,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { server, decide, decideAsync, verifySignature, hmacHex, taskIdToField, addrToField, vkHashToField, buildCircuitInput, redisIsMember, redisAdd, isDummyProofTx, REDIS_ENABLED, REDIS_KEY };
+module.exports = { server, decide, decideAsync, verifySignature, hmacHex, taskIdToField, taskIdField, sha256Hex, addrToField, vkHashToField, buildCircuitInput, redisIsMember, redisAdd, isDummyProofTx, REDIS_ENABLED, REDIS_KEY };
